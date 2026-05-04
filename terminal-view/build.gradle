@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'maven-publish'
 
 android {
-    namespace "com.kali.view"
+    namespace "com.termux.view"
     compileSdkVersion project.properties.compileSdkVersion.toInteger()
 
     dependencies {
@@ -52,7 +52,7 @@ afterEvaluate {
             // Creates a Maven publication called "release".
             release(MavenPublication) {
                 from components.default
-                groupId = 'com.kali'
+                groupId = 'com.termux'
                 artifactId = 'terminal-view'
                 version = '0.118.0'
                 artifact(sourceJar)
