@@ -78,6 +78,20 @@ public class TermuxShellEnvironment extends AndroidShellEnvironment {
         environment.put(ENV_HOME, TermuxConstants.TERMUX_HOME_DIR_PATH);
         environment.put(ENV_PREFIX, TermuxConstants.TERMUX_PREFIX_DIR_PATH);
 
+        // Set LD_PRELOAD to load the path remap library that remaps /data/data/com.termux to /data/data/com.anroot
+        // This is needed because packages from the Termux repository have com.termux paths hardcoded
+        String pathRemapLib = TermuxConstants.TERMUX_LIB_PREFIX_DIR_PATH + "/libpath_remap.so";
+        java.io.File pathRemapFile = new java.io.File(pathRemapLib);
+        if (pathRemapFile.exists()) {
+            // Prepend our path remap library to any existing LD_PRELOAD
+            String existingLdPreload = System.getenv("LD_PRELOAD");
+            if (existingLdPreload != null && !existingLdPreload.isEmpty()) {
+                environment.put("LD_PRELOAD", pathRemapLib + ":" + existingLdPreload);
+            } else {
+                environment.put("LD_PRELOAD", pathRemapLib);
+            }
+        }
+
         // If failsafe is not enabled, then we keep default PATH and TMPDIR so that system binaries can be used
         if (!isFailSafe) {
             environment.put(ENV_TMPDIR, TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);

@@ -27,6 +27,7 @@ import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
@@ -107,6 +108,8 @@ final class TermuxInstaller {
             if (TermuxFileUtils.isTermuxPrefixDirectoryEmpty()) {
                 Logger.logInfo(LOG_TAG, "The termux prefix directory \"" + TERMUX_PREFIX_DIR_PATH + "\" exists but is empty or only contains specific unimportant files.");
             } else {
+                // Ensure path remap library is installed even if prefix already exists
+                installPathRemapLibrary(activity);
                 whenDone.run();
                 return;
             }
@@ -217,6 +220,9 @@ final class TermuxInstaller {
                     }
 
                     Logger.logInfo(LOG_TAG, "Bootstrap packages installed successfully.");
+
+                    // Install path remap library for com.termux -> com.anroot remapping
+                    installPathRemapLibrary(activity);
 
                     // Recreate env file since termux prefix was wiped earlier
                     TermuxShellEnvironment.writeEnvironmentToFile(activity);
@@ -369,6 +375,60 @@ final class TermuxInstaller {
                 }
             }
         }.start();
+    }
+
+    /**
+     * Install the path remap LD_PRELOAD library that remaps /data/data/com.termux to /data/data/com.anroot.
+     * This allows packages from the Termux repository (which have com.termux paths) to work correctly.
+     */
+    static void installPathRemapLibrary(Context context) {
+        try {
+            // Determine the ABI-specific library name
+            String abi = Build.SUPPORTED_ABIS[0];
+            String libName;
+            if (abi.equals("arm64-v8a")) {
+                libName = "libpath_remap_aarch64.so";
+            } else if (abi.equals("armeabi-v7a")) {
+                libName = "libpath_remap_arm.so";
+            } else if (abi.equals("x86_64")) {
+                libName = "libpath_remap_x86_64.so";
+            } else if (abi.equals("x86")) {
+                libName = "libpath_remap_i686.so";
+            } else {
+                Logger.logWarn(LOG_TAG, "Unsupported ABI for path remap library: " + abi);
+                return;
+            }
+
+            // Get the resource ID for the library
+            int resId = context.getResources().getIdentifier(libName.replace(".so", ""), "raw", context.getPackageName());
+            if (resId == 0) {
+                Logger.logWarn(LOG_TAG, "Could not find resource for path remap library: " + libName);
+                return;
+            }
+
+            // Copy to $PREFIX/lib/libpath_remap.so
+            File targetFile = new File(TERMUX_PREFIX_DIR_PATH + "/lib/libpath_remap.so");
+            Error error = FileUtils.createDirectoryFile(targetFile.getParentFile().getAbsolutePath());
+            if (error != null) {
+                Logger.logError(LOG_TAG, "Failed to create directory for path remap library: " + error);
+                return;
+            }
+
+            try (InputStream is = context.getResources().openRawResource(resId);
+                 FileOutputStream fos = new FileOutputStream(targetFile)) {
+                byte[] buffer = new byte[8096];
+                int bytesRead;
+                while ((bytesRead = is.read(buffer)) != -1) {
+                    fos.write(buffer, 0, bytesRead);
+                }
+            }
+            //noinspection OctalInteger
+            Os.chmod(targetFile.getAbsolutePath(), 0755);
+
+            Logger.logInfo(LOG_TAG, "Path remap library installed to " + targetFile.getAbsolutePath());
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Failed to install path remap library: " + e.getMessage());
+        }
     }
 
     private static Error ensureDirectoryExists(File directory) {
