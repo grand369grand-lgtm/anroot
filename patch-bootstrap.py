@@ -30,27 +30,37 @@ def is_elf(data):
 
 def patch_elf_rpath(data):
     """
-    Patch ELF binary RPATH/RUNPATH entries.
-    Replace /data/data/com.termux with /data/data/com.anroot in .dynstr.
+    Patch ELF binary to replace all com.termux references with com.anroot.
     
-    Since the new path is shorter, we pad the remaining bytes with nulls.
+    Replaces both:
+    - /data/data/com.termux -> /data/data/com.anroot (full data path)
+    - com.termux -> com.anroot (standalone package name, e.g. in socket paths)
+    
+    Since the new strings are shorter, we pad the remaining bytes with nulls.
     This is safe because C strings are null-terminated.
     """
     if not is_elf(data):
         return data
     
-    old_bytes = OLD_PATH.encode('ascii')
-    new_bytes = NEW_PATH.encode('ascii')
+    patched = data
     
-    # We need the replacement to be the same length for ELF structural integrity
-    # Pad with null bytes since C strings are null-terminated
-    if len(new_bytes) < len(old_bytes):
-        padded_new = new_bytes + b'\x00' * (len(old_bytes) - len(new_bytes))
+    # First replace the full data path (longer match first to avoid partial overlap)
+    old_path_bytes = OLD_PATH.encode('ascii')
+    new_path_bytes = NEW_PATH.encode('ascii')
+    if len(new_path_bytes) < len(old_path_bytes):
+        padded_path = new_path_bytes + b'\x00' * (len(old_path_bytes) - len(new_path_bytes))
     else:
-        padded_new = new_bytes[:len(old_bytes)]
+        padded_path = new_path_bytes[:len(old_path_bytes)]
+    patched = patched.replace(old_path_bytes, padded_path)
     
-    # Replace all occurrences of the old path with the padded new path
-    patched = data.replace(old_bytes, padded_new)
+    # Then replace standalone com.termux (package name in paths like apps/com.termux/...)
+    old_prefix_bytes = OLD_PREFIX.encode('ascii')
+    new_prefix_bytes = NEW_PREFIX.encode('ascii')
+    if len(new_prefix_bytes) < len(old_prefix_bytes):
+        padded_prefix = new_prefix_bytes + b'\x00' * (len(old_prefix_bytes) - len(new_prefix_bytes))
+    else:
+        padded_prefix = new_prefix_bytes[:len(old_prefix_bytes)]
+    patched = patched.replace(old_prefix_bytes, padded_prefix)
     
     return patched
 
