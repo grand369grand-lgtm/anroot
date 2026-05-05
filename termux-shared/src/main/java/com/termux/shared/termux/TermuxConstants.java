@@ -361,7 +361,7 @@ public final class TermuxConstants {
 
 
     /** Termux:API app name */
-    public static final String TERMUX_API_APP_NAME = "Termux:API"; // Default: "Termux:API"
+    public static final String TERMUX_API_APP_NAME = "Anroot:API"; // Default: "Termux:API"
     /** Termux:API app package name */
     public static final String TERMUX_API_PACKAGE_NAME = TERMUX_PACKAGE_NAME + ".api"; // Default: "com.termux.api"
     /** Termux:API GitHub repo name */
@@ -375,7 +375,7 @@ public final class TermuxConstants {
 
 
     /** Termux:Boot app name */
-    public static final String TERMUX_BOOT_APP_NAME = "Termux:Boot"; // Default: "Termux:Boot"
+    public static final String TERMUX_BOOT_APP_NAME = "Anroot:Boot"; // Default: "Termux:Boot"
     /** Termux:Boot app package name */
     public static final String TERMUX_BOOT_PACKAGE_NAME = TERMUX_PACKAGE_NAME + ".boot"; // Default: "com.termux.boot"
     /** Termux:Boot GitHub repo name */
@@ -389,7 +389,7 @@ public final class TermuxConstants {
 
 
     /** Termux:Float app name */
-    public static final String TERMUX_FLOAT_APP_NAME = "Termux:Float"; // Default: "Termux:Float"
+    public static final String TERMUX_FLOAT_APP_NAME = "Anroot:Float"; // Default: "Termux:Float"
     /** Termux:Float app package name */
     public static final String TERMUX_FLOAT_PACKAGE_NAME = TERMUX_PACKAGE_NAME + ".window"; // Default: "com.termux.window"
     /** Termux:Float GitHub repo name */
@@ -403,7 +403,7 @@ public final class TermuxConstants {
 
 
     /** Termux:Styling app name */
-    public static final String TERMUX_STYLING_APP_NAME = "Termux:Styling"; // Default: "Termux:Styling"
+    public static final String TERMUX_STYLING_APP_NAME = "Anroot:Styling"; // Default: "Termux:Styling"
     /** Termux:Styling app package name */
     public static final String TERMUX_STYLING_PACKAGE_NAME = TERMUX_PACKAGE_NAME + ".styling"; // Default: "com.termux.styling"
     /** Termux:Styling GitHub repo name */
@@ -417,7 +417,7 @@ public final class TermuxConstants {
 
 
     /** Termux:Tasker app name */
-    public static final String TERMUX_TASKER_APP_NAME = "Termux:Tasker"; // Default: "Termux:Tasker"
+    public static final String TERMUX_TASKER_APP_NAME = "Anroot:Tasker"; // Default: "Termux:Tasker"
     /** Termux:Tasker app package name */
     public static final String TERMUX_TASKER_PACKAGE_NAME = TERMUX_PACKAGE_NAME + ".tasker"; // Default: "com.termux.tasker"
     /** Termux:Tasker GitHub repo name */
@@ -431,7 +431,7 @@ public final class TermuxConstants {
 
 
     /** Termux:Widget app name */
-    public static final String TERMUX_WIDGET_APP_NAME = "Termux:Widget"; // Default: "Termux:Widget"
+    public static final String TERMUX_WIDGET_APP_NAME = "Anroot:Widget"; // Default: "Termux:Widget"
     /** Termux:Widget app package name */
     public static final String TERMUX_WIDGET_PACKAGE_NAME = TERMUX_PACKAGE_NAME + ".widget"; // Default: "com.termux.widget"
     /** Termux:Widget GitHub repo name */
@@ -494,7 +494,7 @@ public final class TermuxConstants {
     public static final String APK_RELEASE_GOOGLE_PLAYSTORE_SIGNING_CERTIFICATE_SHA256_DIGEST = "738F0A30A04D3C8A1BE304AF18D0779BCF3EA88FB60808F657A3521861C2EBF9"; // Default: "738F0A30A04D3C8A1BE304AF18D0779BCF3EA88FB60808F657A3521861C2EBF9"
 
     /** Termux Devs APK release */
-    public static final String APK_RELEASE_TERMUX_DEVS = "Termux Devs"; // Default: "Termux Devs"
+    public static final String APK_RELEASE_TERMUX_DEVS = "Anroot Devs"; // Default: "Termux Devs"
 
     /** Termux Devs APK release signing certificate SHA-256 digest */
     public static final String APK_RELEASE_TERMUX_DEVS_SIGNING_CERTIFICATE_SHA256_DIGEST = "F7A038EB551F1BE8FDF388686B784ABAB4552A5D82DF423E3D8F1B5CBE1C69AE"; // Default: "F7A038EB551F1BE8FDF388686B784ABAB4552A5D82DF423E3D8F1B5CBE1C69AE"

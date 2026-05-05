@@ -30,6 +30,8 @@
 #include <dirent.h>
 #include <limits.h>
 #include <sys/statvfs.h>
+#include <sys/time.h>      /* for struct timeval (utimes) */
+#include <sys/statfs.h>    /* for struct statfs (statfs) */
 
 /* Path constants - same length, so in-place replacement is safe */
 #define OLD_PREFIX "/data/data/com.termux"
@@ -156,6 +158,13 @@ typedef int (*orig_truncate_t)(const char *, off_t);
 typedef int (*orig_chdir_t)(const char *);
 typedef char *(*orig_getcwd_t)(char *, size_t);
 typedef long (*orig_pathconf_t)(const char *, int);
+typedef int (*orig_utimes_t)(const char *, const struct timeval *);
+typedef int (*orig_utimensat_t)(int, const char *, const struct timespec *, int);
+typedef int (*orig_mkfifo_t)(const char *, mode_t);
+typedef int (*orig_mknod_t)(const char *, mode_t, dev_t);
+typedef int (*orig_statfs_t)(const char *, struct statfs *);
+typedef int (*orig_fstatfs_t)(int, struct statfs *);
+typedef int (*orig_euidaccess_t)(const char *, int);
 
 
 /* ===== Intercepted functions ===== */
@@ -294,17 +303,23 @@ int linkat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath,
 }
 
 int symlink(const char *target, const char *linkpath) {
-    /* Translate the linkpath, but NOT the target - the target is the
-     * content of the symlink, which might intentionally point to com.termux */
+    /* Translate BOTH the target and linkpath.
+     * When packages from official Termux repos create symlinks, the target
+     * typically points to /data/data/com.termux/... paths which don't exist
+     * in our filesystem. The kernel resolves symlinks internally, bypassing
+     * LD_PRELOAD, so we must translate the target here. */
+    const char *ttarget = translate_path(target);
     const char *tlink = translate_path(linkpath);
     orig_symlink_t orig = (orig_symlink_t)dlsym(RTLD_NEXT, "symlink");
-    return orig(target, tlink);
+    return orig(ttarget, tlink);
 }
 
 int symlinkat(const char *target, int newdirfd, const char *linkpath) {
+    /* Translate BOTH target and linkpath for the same reason as symlink(). */
+    const char *ttarget = translate_path(target);
     const char *tlink = translate_pathat(newdirfd, linkpath);
     orig_symlinkat_t orig = (orig_symlinkat_t)dlsym(RTLD_NEXT, "symlinkat");
-    return orig(target, newdirfd, tlink);
+    return orig(ttarget, newdirfd, tlink);
 }
 
 int unlink(const char *path) {
@@ -400,4 +415,72 @@ long pathconf(const char *path, int name) {
     const char *tpath = translate_path(path);
     orig_pathconf_t orig = (orig_pathconf_t)dlsym(RTLD_NEXT, "pathconf");
     return orig(tpath, name);
+}
+
+/* ===== Missing syscall interceptions (critical for dpkg) ===== */
+
+/*
+ * utimes() - Used by dpkg to set file timestamps after extraction.
+ * This is the DIRECT cause of "error setting timestamps: No such file or directory"
+ * because dpkg creates files via open() (intercepted) but then calls utimes()
+ * with the original com.termux path (NOT intercepted).
+ *
+ * Note: Android bionic implements utimes() by calling utimensat(AT_FDCWD, path, ts, 0)
+ * internally within libc.so, which likely bypasses PLT/GOT. So we MUST intercept
+ * utimes() directly, not just utimensat().
+ */
+int utimes(const char *path, const struct timeval tv[2]) {
+    const char *tpath = translate_path(path);
+    orig_utimes_t orig = (orig_utimes_t)dlsym(RTLD_NEXT, "utimes");
+    return orig(tpath, tv);
+}
+
+/*
+ * utimensat() - Used by coreutils, gzip, patch, tar, zstd for setting timestamps.
+ * Also used internally by bionic's futimens() and utimes(), but those internal
+ * calls within libc.so bypass LD_PRELOAD, so we must intercept each function
+ * individually.
+ */
+int utimensat(int dirfd, const char *path, const struct timespec ts[2], int flags) {
+    const char *tpath = translate_pathat(dirfd, path);
+    orig_utimensat_t orig = (orig_utimensat_t)dlsym(RTLD_NEXT, "utimensat");
+    return orig(dirfd, tpath, ts, flags);
+}
+
+/*
+ * mkfifo() - Used by dpkg and coreutils for creating named pipes.
+ */
+int mkfifo(const char *path, mode_t mode) {
+    const char *tpath = translate_path(path);
+    orig_mkfifo_t orig = (orig_mkfifo_t)dlsym(RTLD_NEXT, "mkfifo");
+    return orig(tpath, mode);
+}
+
+/*
+ * mknod() - Used by dpkg, coreutils, and fsck.cramfs for creating device nodes.
+ */
+int mknod(const char *path, mode_t mode, dev_t dev) {
+    const char *tpath = translate_path(path);
+    orig_mknod_t orig = (orig_mknod_t)dlsym(RTLD_NEXT, "mknod");
+    return orig(tpath, mode, dev);
+}
+
+/*
+ * statfs() - Used by dpkg for filesystem statistics. Different from statvfs()
+ * which we already intercept. Both exist as separate syscalls on Linux.
+ */
+int statfs(const char *path, struct statfs *buf) {
+    const char *tpath = translate_path(path);
+    orig_statfs_t orig = (orig_statfs_t)dlsym(RTLD_NEXT, "statfs");
+    return orig(tpath, buf);
+}
+
+/*
+ * euidaccess() - Used by some programs to check file access with effective UID.
+ * Android bionic provides this as a wrapper around faccessat().
+ */
+int euidaccess(const char *path, int mode) {
+    const char *tpath = translate_path(path);
+    orig_euidaccess_t orig = (orig_euidaccess_t)dlsym(RTLD_NEXT, "euidaccess");
+    return orig(tpath, mode);
 }

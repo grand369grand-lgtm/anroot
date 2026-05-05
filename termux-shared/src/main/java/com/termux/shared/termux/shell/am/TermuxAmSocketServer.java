@@ -60,7 +60,7 @@ public class TermuxAmSocketServer {
 
     public static final String LOG_TAG = "TermuxAmSocketServer";
 
-    public static final String TITLE = "TermuxAm";
+    public static final String TITLE = "AnrootAm";
 
     /** The static instance for the {@link TermuxAmSocketServer} {@link LocalSocketManager}. */
     private static LocalSocketManager termuxAmSocketServer;
