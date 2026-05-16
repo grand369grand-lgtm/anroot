@@ -4,22 +4,13 @@ Patch Anroot bootstrap zips to:
 1. Replace com.termux with com.anroot in all files (text and ELF binaries)
 2. Inject custom Anroot scripts and configurations
 
-This script processes bootstrap zip files and replaces all references to
-com.termux with com.anroot in both text files (scripts, configs) and
-ELF binaries (RPATH/RUNPATH entries). It also injects custom Anroot
-files for first-boot setup, auto-login, dpkg wrapping, etc.
-
 Usage: python3 patch-bootstrap.py <zip_file> [zip_file ...]
 """
 
 import os
 import sys
-import struct
-import tempfile
-import shutil
 import zipfile
 
-# The old and new package names
 OLD_PREFIX = "com.termux"
 NEW_PREFIX = "com.anroot"
 OLD_PATH = "/data/data/com.termux"
@@ -27,260 +18,27 @@ NEW_PATH = "/data/data/com.anroot"
 
 
 # ============================================================================
-# CUSTOM ANROOT FILES TO INJECT
+# dpkg-wrap v2 - Properly rewrites com.termux paths in .deb packages
+# Uses dpkg-deb -R to extract, renames directories, dpkg-deb -b to rebuild
+# Does NOT use the 'file' command (not in bootstrap)
 # ============================================================================
-
-ANROOT_FIRST_BOOT = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# anroot-first-boot - First boot setup for Anroot
-# Installs proot-distro, Debian, and configures auto-login
-
-export PREFIX=/data/data/com.anroot/files/usr
-export HOME=/data/data/com.anroot/files/home
-export PATH=$PREFIX/bin:$PATH
-export TMPDIR=$PREFIX/tmp
-export LD_LIBRARY_PATH=$PREFIX/lib
-
-LOG_PREFIX="[Anroot Setup]"
-
-echo "$LOG_PREFIX === Anroot First Boot Setup Started ==="
-echo "$LOG_PREFIX Date: $(date)"
-echo "$LOG_PREFIX Prefix: $PREFIX"
-
-# --- Setup dpkg wrapper ---
-echo "$LOG_PREFIX Setting up dpkg wrapper..."
-if [ -f "$PREFIX/bin/dpkg-wrap" ]; then
-    # Save original dpkg as dpkg.bin
-    if [ ! -f "$PREFIX/bin/dpkg.bin" ]; then
-        cp "$PREFIX/bin/dpkg" "$PREFIX/bin/dpkg.bin"
-    fi
-    # Replace dpkg with our wrapper
-    cp "$PREFIX/bin/dpkg-wrap" "$PREFIX/bin/dpkg"
-    chmod 700 "$PREFIX/bin/dpkg"
-    echo "$LOG_PREFIX dpkg wrapper installed."
-else
-    echo "$LOG_PREFIX WARNING: dpkg-wrap not found, skipping dpkg wrapper setup"
-fi
-
-# --- Setup Anroot welcome banner ---
-echo "$LOG_PREFIX Setting up Anroot welcome banner..."
-cat > "$PREFIX/etc/motd" << 'MOTDEOF'
-  ___                         ____            _
- / _ \ _ __   ___ _ __ __ _  |  _ \ ___  ___| |_ ___
-| |_| | '_ \ / _ \ '__/ _` | | |_) / _ \/ __| __/ __|
-|  _  | |_) |  __/ | | (_| | |  _ <  __/\__ \ |_\__ \
-|_| |_| .__/ \___|_|  \__,_| |_| \_\___||___/\__|___/
-      |_|
-  Anroot - Linux on Android
-
-  Website: https://crossberry.vercel.app
-  GitHub:  https://github.com/grand369grand-lgtm/anroot
-
-  Quick Start:
-    anroot-setup-storage  - Setup storage access
-    anroot-update         - Update packages
-    anroot-shell          - Open Anroot Termux shell
-
-MOTDEOF
-chmod 644 "$PREFIX/etc/motd"
-echo "$LOG_PREFIX Welcome banner configured."
-
-# --- Setup auto-login to Debian ---
-echo "$LOG_PREFIX Setting up auto-login to Debian..."
-mkdir -p "$PREFIX/etc/profile.d"
-cat > "$PREFIX/etc/profile.d/anroot-autologin.sh" << 'AUTOLOGINEOF'
-#!/data/data/com.anroot/files/usr/bin/sh
-# Auto-login to Debian proot on every shell start
-# Skip if already inside Debian or if Debian is not installed yet
-
-if [ -n "$ANROOT_DEBIAN_ACTIVE" ]; then
-    # Already inside Debian, do nothing
-    return 0
-fi
-
-# Check if Debian is installed
-DEBIAN_ROOTFS="/data/data/com.anroot/files/usr/var/proot-distro/installed-rootfs/debian"
-if [ -d "$DEBIAN_ROOTFS" ]; then
-    export ANROOT_DEBIAN_ACTIVE=1
-    # Bind external storage into Debian if available
-    STORAGE_BINDS=""
-    if [ -d "/data/data/com.anroot/files/home/storage" ]; then
-        STORAGE_BINDS="--bind /data/data/com.anroot/files/home/storage:/root/storage"
-    fi
-    if [ -d "/sdcard" ]; then
-        STORAGE_BINDS="$STORAGE_BINDS --bind /sdcard:/root/sdcard"
-    fi
-    # Clear screen before entering Debian
-    clear
-    exec proot-distro login debian $STORAGE_BINDS
-fi
-AUTOLOGINEOF
-chmod 700 "$PREFIX/etc/profile.d/anroot-autologin.sh"
-echo "$LOG_PREFIX Auto-login configured."
-
-# --- Setup home directory ---
-echo "$LOG_PREFIX Setting up home directory..."
-mkdir -p "$HOME"
-cat > "$HOME/.bashrc" << 'BASHRC'
-# ~/.bashrc: executed by bash(1) for non-login shells.
-# Anroot custom bashrc
-
-# If running interactively, don't do anything
-case $- in
-    *i*) ;;
-      *) return;;
-esac
-
-# Don't put duplicate lines or lines starting with space in the history
-HISTCONTROL=ignoreboth
-shopt -s histappend
-HISTSIZE=1000
-HISTFILESIZE=2000
-shopt -s checkwinsize
-
-# Set prompt
-if [ -n "$ANROOT_DEBIAN_ACTIVE" ]; then
-    PS1='\[\033[01;32m\]anroot@debian\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-else
-    PS1='\[\033[01;32m\]anroot\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-fi
-
-# Aliases
-alias ll='ls -alF'
-alias la='ls -A'
-alias l='ls -CF'
-alias anroot-update='apt update && apt upgrade -y'
-alias anroot-shell='exit'
-BASHRC
-chmod 644 "$HOME/.bashrc"
-echo "$LOG_PREFIX Home directory configured."
-
-# --- Install proot-distro ---
-echo "$LOG_PREFIX Installing proot-distro..."
-# Use apt directly instead of pkg to avoid anroot-setup-package-manager dependency
-apt update 2>&1 | tail -5
-if [ $? -ne 0 ]; then
-    echo "$LOG_PREFIX WARNING: apt update failed, trying pkg..."
-    pkg update 2>&1 | tail -5
-fi
-
-apt install -y proot-distro 2>&1 | tail -10
-if [ $? -ne 0 ]; then
-    echo "$LOG_PREFIX WARNING: apt install proot-distro failed, trying pkg..."
-    pkg install -y proot-distro 2>&1 | tail -10
-fi
-
-# Verify proot-distro is available
-if ! command -v proot-distro >/dev/null 2>&1; then
-    echo "$LOG_PREFIX ERROR: proot-distro installation failed!"
-    echo "$LOG_PREFIX Try running manually: apt update && apt install proot-distro"
-    # Don't exit - let the user try manually
-else
-    echo "$LOG_PREFIX proot-distro installed successfully."
-
-    # --- Install Debian ---
-    echo "$LOG_PREFIX Installing Debian (this may take several minutes)..."
-    proot-distro install debian 2>&1 | tail -20
-
-    # Verify Debian installation
-    DEBIAN_ROOTFS="/data/data/com.anroot/files/usr/var/proot-distro/installed-rootfs/debian"
-    if [ -d "$DEBIAN_ROOTFS" ]; then
-        echo "$LOG_PREFIX Debian installed successfully."
-
-        # --- Install essential packages inside Debian ---
-        echo "$LOG_PREFIX Installing essential packages inside Debian..."
-        proot-distro login debian -- apt update 2>&1 | tail -5
-        proot-distro login debian -- apt install -y sudo ncurses-term nano 2>&1 | tail -10
-
-        # --- Install Anroot custom commands inside Debian ---
-        echo "$LOG_PREFIX Installing Anroot commands inside Debian..."
-        mkdir -p "$DEBIAN_ROOTFS/usr/local/bin"
-
-        # anroot-setup-storage command
-        cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-setup-storage" << 'CMDEOF'
-#!/bin/sh
-# anroot-setup-storage - Setup external storage access in Anroot
-echo "Setting up Anroot storage access..."
-echo "Storage is automatically available at:"
-echo "  /root/storage  - Termux storage symlinks"
-echo "  /root/sdcard   - External storage (/sdcard)"
-echo ""
-echo "If storage is not accessible, run 'termux-setup-storage'"
-echo "from the Anroot Termux shell (use 'anroot-shell' to exit Debian first)."
-CMDEOF
-        chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-setup-storage"
-
-        # anroot-info command
-        cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-info" << 'CMDEOF'
-#!/bin/sh
-# anroot-info - Show Anroot system information
-echo "=== Anroot System Information ==="
-echo "App:       Anroot (Debian on Android)"
-echo "Website:   https://crossberry.vercel.app"
-echo "GitHub:    https://github.com/grand369grand-lgtm/anroot"
-echo ""
-echo "Debian version: $(cat /etc/debian_version 2>/dev/null || echo 'Unknown')"
-echo "Kernel: $(uname -r)"
-echo "Architecture: $(uname -m)"
-echo "Uptime: $(uptime)"
-CMDEOF
-        chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-info"
-
-        # anroot-update command
-        cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-update" << 'CMDEOF'
-#!/bin/sh
-# anroot-update - Update both Debian and Termux packages
-echo "=== Updating Debian packages ==="
-apt update && apt upgrade -y
-echo ""
-echo "=== Updating Anroot Termux packages ==="
-echo "Run 'anroot-shell' to go to Termux shell, then 'pkg upgrade'"
-CMDEOF
-        chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-update"
-
-        # anroot-shell command (exit proot back to Termux shell)
-        cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-shell" << 'CMDEOF'
-#!/bin/sh
-# anroot-shell - Exit Debian proot to return to Anroot Termux shell
-echo "Exiting Debian. Type 'exit' again to close the terminal."
-echo "To return to Debian, just start a new terminal session."
-exit 0
-CMDEOF
-        chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-shell"
-
-        echo "$LOG_PREFIX Anroot commands installed in Debian."
-    else
-        echo "$LOG_PREFIX ERROR: Debian rootfs not found after installation!"
-        echo "$LOG_PREFIX You can try manually: proot-distro install debian"
-    fi
-fi
-
-# --- Mark first boot complete ---
-rm -f "$PREFIX/ANROOT_FIRST_BOOT"
-
-echo "$LOG_PREFIX === Anroot First Boot Setup Complete ==="
-echo "$LOG_PREFIX Please restart the app to auto-login to Debian."
-echo "$LOG_PREFIX If Debian was not installed, run: proot-distro install debian"
-'''
-
 DPKG_WRAP = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# dpkg-wrap - Wrapper for dpkg that translates com.termux paths to com.anroot
-# This intercepts .deb package installations and rewrites paths inside them
-# so that packages designed for Termux work with Anroot's com.anroot paths.
+# dpkg-wrap v2 - Rewrite com.termux→com.anroot paths in .deb packages
+# Installed as $PREFIX/bin/dpkg, original binary saved as $PREFIX/bin/dpkg.bin
 
 export PREFIX=/data/data/com.anroot/files/usr
 DPKG_BIN="$PREFIX/bin/dpkg.bin"
 
-# If dpkg.bin doesn't exist, we can't wrap
-if [ ! -f "$DPKG_BIN" ]; then
-    # Fall back to original dpkg if it exists
-    if [ -f "$PREFIX/bin/dpkg.orig" ]; then
-        exec "$PREFIX/bin/dpkg.orig" "$@"
+if [ ! -x "$DPKG_BIN" ]; then
+    if [ -x "$PREFIX/bin/dpkg.orig" ]; then
+        DPKG_BIN="$PREFIX/bin/dpkg.orig"
+    else
+        echo "dpkg-wrap: ERROR: No dpkg binary found!" >&2
+        exit 1
     fi
-    echo "Error: dpkg.bin not found" >&2
-    exit 1
 fi
 
-# Scan arguments for .deb files
+# Separate .deb files from other args
 DEB_FILES=""
 OTHER_ARGS=""
 for arg in "$@"; do
@@ -298,75 +56,331 @@ for arg in "$@"; do
     esac
 done
 
-# If no .deb files, just pass through to real dpkg
+# No .deb files → pass through to real dpkg
 if [ -z "$DEB_FILES" ]; then
     exec "$DPKG_BIN" "$@"
 fi
 
 # Process each .deb file
+RESULT=0
 for deb in $DEB_FILES; do
-    TMPDIR=$(mktemp -d)
-    EXTRACT_DIR="$TMPDIR/extract"
+    # Quick check: does this .deb contain com.termux paths in the tar listing?
+    NEEDS_REWRITE=0
+    if dpkg-deb --fsys-tarfile "$deb" 2>/dev/null | tar -tf - 2>/dev/null | grep -q "com\.termux"; then
+        NEEDS_REWRITE=1
+    fi
 
-    # Extract the .deb
-    "$DPKG_BIN" --fsys-tarfile "$deb" 2>/dev/null | tar -xf - -C "$TMPDIR" 2>/dev/null
-    if [ $? -ne 0 ]; then
-        # Can't extract, just use as-is
-        rm -rf "$TMPDIR"
-        OTHER_ARGS="$OTHER_ARGS $deb"
+    if [ $NEEDS_REWRITE -eq 0 ]; then
+        # No rewriting needed, install directly
+        "$DPKG_BIN" $OTHER_ARGS "$deb"
+        RESULT=$?
         continue
     fi
 
-    # Check if any file contains com.termux references
-    NEEDS_PATCH=0
-    if grep -rl "com.termux" "$TMPDIR" >/dev/null 2>&1; then
-        NEEDS_PATCH=1
+    # Need to rewrite paths in the .deb
+    WRAP_TMP=$(mktemp -d "$PREFIX/tmp/dpkg-wrap.XXXXXX")
+    if [ -z "$WRAP_TMP" ] || [ ! -d "$WRAP_TMP" ]; then
+        "$DPKG_BIN" $OTHER_ARGS "$deb"
+        RESULT=$?
+        continue
     fi
 
-    if [ $NEEDS_PATCH -eq 1 ]; then
-        # Replace com.termux with com.anroot in all text files
-        find "$TMPDIR" -type f | while read f; do
-            if file "$f" | grep -q "text\|ASCII\|script\|shell"; then
-                sed -i 's|com\.termux|com.anroot|g' "$f" 2>/dev/null
-                sed -i 's|/data/data/com\.termux|/data/data/com.anroot|g' "$f" 2>/dev/null
+    EXTRACT="$WRAP_TMP/extract"
+    mkdir -p "$EXTRACT"
+
+    # Extract the .deb (control + data) using dpkg-deb -R
+    if ! dpkg-deb -R "$deb" "$EXTRACT" 2>/dev/null; then
+        rm -rf "$WRAP_TMP"
+        "$DPKG_BIN" $OTHER_ARGS "$deb"
+        RESULT=$?
+        continue
+    fi
+
+    # Step 1: Rename com.termux directories → com.anroot in extracted data
+    # The data is under $EXTRACT/data/data/com.termux/...
+    if [ -d "$EXTRACT/data/data/com.termux" ]; then
+        mkdir -p "$EXTRACT/data/data/com.anroot"
+        for item in "$EXTRACT/data/data/com.termux"/*; do
+            [ -e "$item" ] && mv -f "$item" "$EXTRACT/data/data/com.anroot/" 2>/dev/null
+        done
+        rm -rf "$EXTRACT/data/data/com.termux"
+    fi
+
+    # Step 2: Rewrite paths in DEBIAN control files
+    if [ -d "$EXTRACT/DEBIAN" ]; then
+        for ctrl_file in "$EXTRACT/DEBIAN"/*; do
+            if [ -f "$ctrl_file" ]; then
+                sed -i 's|com\.termux|com.anroot|g;s|/data/data/com\.termux|/data/data/com.anroot|g' "$ctrl_file" 2>/dev/null
             fi
         done
-
-        # Rebuild the .deb
-        MODIFIED_DEB="$TMPDIR/modified.deb"
-        # Create control and data tarballs
-        if [ -d "$TMPDIR/control" ] && [ -d "$TMPDIR/data" ]; then
-            cd "$TMPDIR/control" && tar -cf "$TMPDIR/control.tar" . 2>/dev/null
-            cd "$TMPDIR/data" && tar -cf "$TMPDIR/data.tar" . 2>/dev/null
-            # Reassemble using ar
-            if command -v ar >/dev/null 2>&1; then
-                cd "$TMPDIR"
-                ar r "$MODIFIED_DEB" debian-binary control.tar data.tar 2>/dev/null
-            fi
-        fi
-
-        if [ -f "$MODIFIED_DEB" ]; then
-            # Install the modified .deb
-            "$DPKG_BIN" $OTHER_ARGS "$MODIFIED_DEB"
-            rm -rf "$TMPDIR"
-            continue
-        fi
     fi
 
-    rm -rf "$TMPDIR"
-    # Install the original .deb
-    "$DPKG_BIN" $OTHER_ARGS "$deb"
+    # Step 3: Rewrite paths in known text file types in the data
+    # Only process files that are likely text (avoid corrupting binaries)
+    find "$EXTRACT" -path "$EXTRACT/DEBIAN" -prune -o -type f \( \
+        -name "*.sh" -o -name "*.list" -o -name "*.md5sums" -o \
+        -name "*.conffiles" -o -name "*.config" -o -name "*.templates" -o \
+        -name "*.postinst" -o -name "*.preinst" -o -name "*.postrm" -o \
+        -name "*.prerm" -o -name "*.pc" -o -name "*.la" -o -name "*.h" -o \
+        -name "*.cmake" -o -name "*.py" -o -name "*.pl" -o -name "*.rb" -o \
+        -name "*.conf" -o -name "*.cfg" -o -name "*.txt" -o \
+        -name "*.properties" -o -name "*.xml" -o -name "*.json" \
+    \) -print 2>/dev/null | while read f; do
+        sed -i 's|com\.termux|com.anroot|g;s|/data/data/com\.termux|/data/data/com.anroot|g' "$f" 2>/dev/null
+    done
+
+    # Step 4: Fix symlinks pointing to com.termux paths
+    find "$EXTRACT" -type l 2>/dev/null | while read link; do
+        target=$(readlink "$link" 2>/dev/null)
+        if echo "$target" | grep -q "com\.termux"; then
+            new_target=$(echo "$target" | sed 's|com\.termux|com.anroot|g')
+            rm -f "$link" 2>/dev/null
+            ln -sf "$new_target" "$link" 2>/dev/null
+        fi
+    done
+
+    # Step 5: Rebuild the .deb
+    NEW_DEB="$WRAP_TMP/modified.deb"
+    if dpkg-deb -b "$EXTRACT" "$NEW_DEB" 2>/dev/null; then
+        "$DPKG_BIN" $OTHER_ARGS "$NEW_DEB"
+        RESULT=$?
+    else
+        # Rebuild failed, try installing original as last resort
+        "$DPKG_BIN" $OTHER_ARGS "$deb"
+        RESULT=$?
+    fi
+
+    rm -rf "$WRAP_TMP"
 done
+
+exit $RESULT
 '''
 
+
+# ============================================================================
+# First-boot setup script
+# ============================================================================
+ANROOT_FIRST_BOOT = r'''#!/data/data/com.anroot/files/usr/bin/sh
+# anroot-first-boot v4 - First boot setup for Anroot
+# Installs proot-distro, Debian, and configures auto-login
+
+export PREFIX=/data/data/com.anroot/files/usr
+export HOME=/data/data/com.anroot/files/home
+export PATH=$PREFIX/bin:$PATH
+export TMPDIR=$PREFIX/tmp
+export LD_LIBRARY_PATH=$PREFIX/lib
+
+LOG="[Anroot Setup]"
+echo "$LOG === Anroot First Boot Setup Started ==="
+echo "$LOG Date: $(date)"
+echo "$LOG Prefix: $PREFIX"
+
+# --- Step 1: Setup dpkg wrapper ---
+echo "$LOG Setting up dpkg wrapper..."
+if [ -f "$PREFIX/bin/dpkg-wrap" ] && [ -f "$PREFIX/bin/dpkg" ]; then
+    # Save original dpkg binary as dpkg.bin
+    if [ ! -f "$PREFIX/bin/dpkg.bin" ]; then
+        cp "$PREFIX/bin/dpkg" "$PREFIX/bin/dpkg.bin"
+        chmod 700 "$PREFIX/bin/dpkg.bin"
+    fi
+    # Replace dpkg with our wrapper
+    cp "$PREFIX/bin/dpkg-wrap" "$PREFIX/bin/dpkg"
+    chmod 700 "$PREFIX/bin/dpkg"
+    echo "$LOG dpkg wrapper installed successfully."
+else
+    echo "$LOG WARNING: dpkg-wrap not found, skipping wrapper setup"
+fi
+
+# --- Step 2: Setup Anroot welcome banner ---
+echo "$LOG Setting up welcome banner..."
+cat > "$PREFIX/etc/motd" << 'MOTDEOF'
+  ___                         ____            _
+ / _ \ _ __   ___ _ __ __ _  |  _ \ ___  ___| |_ ___
+| |_| | '_ \ / _ \ '__/ _` | | |_) / _ \/ __| __/ __|
+|  _  | |_) |  __/ | | (_| | |  _ <  __/\__ \ |_\__ \
+|_| |_| .__/ \___|_|  \__,_| |_| \_\___||___/\__|___/
+      |_|
+  Anroot - Linux on Android
+
+  Website: https://crossberry.vercel.app
+  GitHub:  https://github.com/grand369grand-lgtm/anroot
+MOTDEOF
+chmod 644 "$PREFIX/etc/motd"
+
+# --- Step 3: Setup auto-login to Debian ---
+echo "$LOG Setting up auto-login to Debian..."
+mkdir -p "$PREFIX/etc/profile.d"
+cat > "$PREFIX/etc/profile.d/anroot-autologin.sh" << 'AUTOEOF'
+#!/data/data/com.anroot/files/usr/bin/sh
+# Auto-login to Debian proot on every shell start
+
+# Skip if already inside Debian
+if [ -n "$ANROOT_DEBIAN_ACTIVE" ]; then
+    return 0
+fi
+
+# Check if first-boot setup is still running
+if [ -f "$PREFIX/ANROOT_FIRST_BOOT" ]; then
+    echo ""
+    echo "=== Anroot First-Time Setup ==="
+    echo "Setup is still running in the background..."
+    echo "Please wait for it to complete. This may take a few minutes."
+    echo ""
+    # Wait for first-boot to finish (max 10 minutes)
+    WAITED=0
+    while [ -f "$PREFIX/ANROOT_FIRST_BOOT" ] && [ $WAITED -lt 600 ]; do
+        sleep 5
+        WAITED=$((WAITED + 5))
+        echo -n "."
+    done
+    echo ""
+fi
+
+# Check if Debian is installed
+DEBIAN_ROOTFS="$PREFIX/var/proot-distro/installed-rootfs/debian"
+if [ -d "$DEBIAN_ROOTFS" ]; then
+    export ANROOT_DEBIAN_ACTIVE=1
+
+    # Build bind mounts for storage access
+    STORAGE_BINDS=""
+    if [ -d "$HOME/storage" ]; then
+        STORAGE_BINDS="--bind $HOME/storage:/root/storage"
+    fi
+    if [ -d "/sdcard" ]; then
+        STORAGE_BINDS="$STORAGE_BINDS --bind /sdcard:/root/sdcard"
+    fi
+
+    # Clear screen and enter Debian
+    clear
+    exec proot-distro login debian $STORAGE_BINDS
+else
+    # Debian not installed - offer to run setup
+    echo ""
+    echo "=== Welcome to Anroot ==="
+    echo "Debian is not installed yet."
+    echo "Run 'anroot-first-boot' to set up Debian."
+    echo ""
+fi
+AUTOEOF
+chmod 700 "$PREFIX/etc/profile.d/anroot-autologin.sh"
+
+# --- Step 4: Create marker that first-boot is running ---
+touch "$PREFIX/ANROOT_FIRST_BOOT"
+
+# --- Step 5: Install proot-distro using apt (NOT pkg) ---
+echo "$LOG Installing proot-distro..."
+echo "$LOG Running apt update..."
+apt update 2>&1 | tail -3
+
+echo "$LOG Running apt install proot-distro..."
+apt install -y proot-distro 2>&1 | tail -5
+
+# Verify proot-distro is available
+if ! command -v proot-distro >/dev/null 2>&1; then
+    echo "$LOG ERROR: proot-distro installation failed!"
+    echo "$LOG You can try manually later: apt update && apt install proot-distro"
+    rm -f "$PREFIX/ANROOT_FIRST_BOOT"
+    exit 1
+fi
+echo "$LOG proot-distro installed successfully."
+
+# --- Step 6: Install Debian ---
+echo "$LOG Installing Debian (this may take several minutes)..."
+proot-distro install debian 2>&1 | tail -10
+
+# Verify Debian installation
+DEBIAN_ROOTFS="$PREFIX/var/proot-distro/installed-rootfs/debian"
+if [ ! -d "$DEBIAN_ROOTFS" ]; then
+    echo "$LOG ERROR: Debian rootfs not found after installation!"
+    echo "$LOG Try manually: proot-distro install debian"
+    rm -f "$PREFIX/ANROOT_FIRST_BOOT"
+    exit 1
+fi
+echo "$LOG Debian installed successfully."
+
+# --- Step 7: Install essential packages inside Debian ---
+echo "$LOG Installing essential packages inside Debian..."
+proot-distro login debian -- apt update 2>&1 | tail -3
+proot-distro login debian -- apt install -y sudo ncurses-term nano curl wget 2>&1 | tail -5
+
+# --- Step 8: Install Anroot custom commands inside Debian ---
+echo "$LOG Installing Anroot commands inside Debian..."
+mkdir -p "$DEBIAN_ROOTFS/usr/local/bin"
+
+# anroot-setup-storage
+cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-setup-storage" << 'CMDEOF'
+#!/bin/sh
+echo "=== Anroot Storage Setup ==="
+echo "Storage is automatically available at:"
+echo "  /root/storage  - Anroot storage symlinks"
+echo "  /root/sdcard   - External storage (/sdcard)"
+echo ""
+echo "If storage is not accessible, exit Debian (type 'exit'),"
+echo "then run 'termux-setup-storage' from the Anroot shell."
+CMDEOF
+chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-setup-storage"
+
+# anroot-info
+cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-info" << 'CMDEOF'
+#!/bin/sh
+echo "=== Anroot System Information ==="
+echo "App:       Anroot (Debian on Android)"
+echo "Website:   https://crossberry.vercel.app"
+echo "GitHub:    https://github.com/grand369grand-lgtm/anroot"
+echo "Debian:    $(cat /etc/debian_version 2>/dev/null || echo 'Unknown')"
+echo "Kernel:    $(uname -r)"
+echo "Arch:      $(uname -m)"
+CMDEOF
+chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-info"
+
+# anroot-update
+cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-update" << 'CMDEOF'
+#!/bin/sh
+echo "=== Updating Debian packages ==="
+apt update && apt upgrade -y
+CMDEOF
+chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-update"
+
+# anroot-shell
+cat > "$DEBIAN_ROOTFS/usr/local/bin/anroot-shell" << 'CMDEOF'
+#!/bin/sh
+echo "Exiting Debian proot. Start a new session to return."
+exit 0
+CMDEOF
+chmod 755 "$DEBIAN_ROOTFS/usr/local/bin/anroot-shell"
+
+# --- Step 9: Setup Debian /root/.bashrc ---
+cat > "$DEBIAN_ROOTFS/root/.bashrc" << 'BASHRC'
+# ~/.bashrc: Anroot Debian shell
+case $- in *i*) ;; *) return;; esac
+HISTCONTROL=ignoreboth
+shopt -s histappend
+HISTSIZE=1000
+HISTFILESIZE=2000
+shopt -s checkwinsize
+PS1='\[\033[01;32m\]root@anroot\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]# '
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+BASHRC
+chmod 644 "$DEBIAN_ROOTFS/root/.bashrc"
+
+# --- Done ---
+rm -f "$PREFIX/ANROOT_FIRST_BOOT"
+echo "$LOG === Anroot First Boot Setup Complete! ==="
+echo "$LOG Restart the app to auto-login to Debian."
+'''
+
+
+# ============================================================================
+# Other injected scripts
+# ============================================================================
 ANROOT_PKG = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# anroot-pkg - Wrapper for pkg command
 export PREFIX=/data/data/com.anroot/files/usr
 exec "$PREFIX/bin/pkg" "$@"
 '''
 
 ANROOT_CHANGE_REPO = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# anroot-change-repo - Wrapper for termux-change-repo
 export PREFIX=/data/data/com.anroot/files/usr
 if command -v termux-change-repo >/dev/null 2>&1; then
     exec termux-change-repo "$@"
@@ -377,29 +391,20 @@ fi
 '''
 
 ANROOT_SETUP_STORAGE = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# anroot-setup-storage - Setup storage access
-# This requests Android storage permission and creates symlinks
 export PREFIX=/data/data/com.anroot/files/usr
 if command -v termux-setup-storage >/dev/null 2>&1; then
     exec termux-setup-storage "$@"
 else
     echo "Requesting storage access..."
-    echo "Please grant storage permission when prompted."
     echo "Storage will be available at ~/storage/"
 fi
 '''
 
 ANROOT_SETUP_PACKAGE_MANAGER = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# anroot-setup-package-manager - Wrapper for termux-setup-package-manager
-# The pkg script calls this, but after com.termux->com.anroot replacement,
-# the binary name gets changed. This wrapper redirects to the real binary.
 export PREFIX=/data/data/com.anroot/files/usr
 if command -v termux-setup-package-manager >/dev/null 2>&1; then
     exec termux-setup-package-manager "$@"
 else
-    # If termux-setup-package-manager doesn't exist either,
-    # just set up the default repo manually
-    echo "Setting up Anroot package manager..."
     mkdir -p $PREFIX/etc/apt/sources.list.d
     echo "deb https://packages.termux.dev/apt/termux-main stable main" > $PREFIX/etc/apt/sources.list
     apt update 2>/dev/null
@@ -407,15 +412,10 @@ fi
 '''
 
 ANROOT_PATH_SH = r'''#!/data/data/com.anroot/files/usr/bin/sh
-# anroot-path.sh - Set up Anroot environment and clear screen on startup
-# This runs on every shell session start via profile.d
 export LD_LIBRARY_PATH=/data/data/com.anroot/files/usr/lib
-# Clear screen to hide Termux bootstrap messages
 clear
 '''
 
-# Map of files to inject into the bootstrap zip
-# Key = path in zip (relative to $PREFIX), Value = content
 INJECTED_FILES = {
     "bin/anroot-first-boot": ANROOT_FIRST_BOOT,
     "bin/dpkg-wrap": DPKG_WRAP,
@@ -428,49 +428,25 @@ INJECTED_FILES = {
 
 
 def is_elf(data):
-    """Check if data starts with ELF magic bytes."""
     return data[:4] == b'\x7fELF'
 
 
 def patch_elf_rpath(data):
-    """
-    Patch ELF binary RPATH/RUNPATH entries.
-    Replace /data/data/com.termux with /data/data/com.anroot in .dynstr.
-
-    Since the new path is shorter, we pad the remaining bytes with nulls.
-    This is safe because C strings are null-terminated.
-    """
     if not is_elf(data):
         return data
-
     old_bytes = OLD_PATH.encode('ascii')
     new_bytes = NEW_PATH.encode('ascii')
-
-    # We need the replacement to be the same length for ELF structural integrity
-    # Pad with null bytes since C strings are null-terminated
     if len(new_bytes) < len(old_bytes):
         padded_new = new_bytes + b'\x00' * (len(old_bytes) - len(new_bytes))
     else:
         padded_new = new_bytes[:len(old_bytes)]
-
-    # Replace all occurrences of the old path with the padded new path
-    patched = data.replace(old_bytes, padded_new)
-
-    return patched
+    return data.replace(old_bytes, padded_new)
 
 
 def patch_text(data):
-    """
-    Patch text files (scripts, configs) by replacing com.termux with com.anroot.
-    For text files, the replacement can be shorter since there's no structural constraint.
-    Also replaces "Termux" with "Anroot" in user-visible text, but NOT in internal
-    command names that must remain as-is (like termux-change-repo).
-    """
     try:
         text = data.decode('utf-8', errors='replace')
-        # Replace the package name reference
         text = text.replace(OLD_PREFIX, NEW_PREFIX)
-        # Also replace full paths
         text = text.replace(OLD_PATH, NEW_PATH)
         return text.encode('utf-8', errors='replace')
     except Exception:
@@ -478,8 +454,6 @@ def patch_text(data):
 
 
 def is_text_file(data, filename):
-    """Determine if a file is likely a text file."""
-    # Check by extension
     text_extensions = {
         '.sh', '.bash', '.zsh', '.py', '.pl', '.rb', '.conf', '.cfg',
         '.txt', '.md', '.xml', '.json', '.yaml', '.yml', '.toml',
@@ -489,16 +463,10 @@ def is_text_file(data, filename):
     _, ext = os.path.splitext(filename)
     if ext.lower() in text_extensions:
         return True
-
-    # Check for shebang
     if data[:2] == b'#!':
         return True
-
-    # Check if data contains null bytes (binary)
     if b'\x00' in data[:8192]:
         return False
-
-    # Try to decode as UTF-8
     try:
         data[:8192].decode('utf-8')
         return True
@@ -507,31 +475,21 @@ def is_text_file(data, filename):
 
 
 def patch_zip(zip_path):
-    """Patch a bootstrap zip file in place, adding Anroot customizations."""
     print(f"Patching {zip_path}...")
-
-    # Read the original zip
     with zipfile.ZipFile(zip_path, 'r') as zf:
         entries = zf.infolist()
         patched_entries = {}
-
         for entry in entries:
             if entry.is_dir():
                 continue
-
             data = zf.read(entry.filename)
-            original_size = len(data)
-
             if is_elf(data):
-                # Patch ELF binary
                 patched_data = patch_elf_rpath(data)
                 patch_type = "ELF"
             elif is_text_file(data, entry.filename):
-                # Patch text file
                 patched_data = patch_text(data)
                 patch_type = "text"
             else:
-                # For other binary files, try ELF-style byte replacement
                 patched_data = data.replace(
                     OLD_PATH.encode('ascii'),
                     NEW_PATH.encode('ascii') + b'\x00' * (len(OLD_PATH) - len(NEW_PATH))
@@ -541,19 +499,18 @@ def patch_zip(zip_path):
                     NEW_PREFIX.encode('ascii') + b'\x00' * (len(OLD_PREFIX) - len(NEW_PREFIX))
                 )
                 patch_type = "binary"
-
             if patched_data != data:
-                print(f"  Patched ({patch_type}): {entry.filename} ({original_size} bytes)")
-
+                print(f"  Patched ({patch_type}): {entry.filename} ({len(data)} bytes)")
             patched_entries[entry.filename] = patched_data
 
-    # Inject custom Anroot files
+    # Inject custom files
     for inject_path, content in INJECTED_FILES.items():
         content_bytes = content.encode('utf-8')
         patched_entries[inject_path] = content_bytes
         print(f"  Injected: {inject_path} ({len(content_bytes)} bytes)")
 
-    # Write the patched zip
+    # Write patched zip
+    existing_files = set(e.filename for e in entries if not e.is_dir())
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for entry in entries:
             if entry.is_dir():
@@ -561,13 +518,11 @@ def patch_zip(zip_path):
             elif entry.filename in patched_entries:
                 zf.writestr(entry, patched_entries[entry.filename])
             else:
-                zf.writestr(entry, patched_entries.get(entry.filename, b''))
-
-        # Add any new injected files that weren't already in the zip
+                zf.writestr(entry, b'')
+        # Add new injected files
         for inject_path, content_bytes in INJECTED_FILES.items():
-            if inject_path not in [e.filename for e in entries if not e.is_dir()]:
+            if inject_path not in existing_files:
                 zf.writestr(inject_path, content_bytes)
-
     print(f"Done patching {zip_path}")
 
 
@@ -575,7 +530,6 @@ def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <zip_file> [zip_file ...]")
         sys.exit(1)
-
     for zip_path in sys.argv[1:]:
         if not os.path.exists(zip_path):
             print(f"Error: {zip_path} not found")
