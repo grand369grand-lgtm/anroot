@@ -198,8 +198,10 @@ final class TermuxInstaller {
                                         while ((readBytes = zipInput.read(buffer)) != -1)
                                             outStream.write(buffer, 0, readBytes);
                                     }
+                                    // Set execute permissions on bin/ entries, libexec, apt helpers, and Anroot scripts
                                     if (zipEntryName.startsWith("bin/") || zipEntryName.startsWith("libexec") ||
-                                        zipEntryName.startsWith("lib/apt/apt-helper") || zipEntryName.startsWith("lib/apt/methods")) {
+                                        zipEntryName.startsWith("lib/apt/apt-helper") || zipEntryName.startsWith("lib/apt/methods") ||
+                                        zipEntryName.startsWith("etc/profile.d/")) {
                                         //noinspection OctalInteger
                                         Os.chmod(targetFile.getAbsolutePath(), 0700);
                                     }
@@ -214,6 +216,10 @@ final class TermuxInstaller {
                         Os.symlink(symlink.first, symlink.second);
                     }
 
+                    // Anroot: Set execute permissions on critical binaries and scripts
+                    // This ensures login, sh, dash, bash etc. are all executable
+                    setAnrootPermissions(TERMUX_STAGING_PREFIX_DIR_PATH);
+
                     Logger.logInfo(LOG_TAG, "Moving termux prefix staging to prefix directory.");
 
                     if (!TERMUX_STAGING_PREFIX_DIR.renameTo(TERMUX_PREFIX_DIR)) {
@@ -224,6 +230,9 @@ final class TermuxInstaller {
 
                     // Recreate env file since termux prefix was wiped earlier
                     TermuxShellEnvironment.writeEnvironmentToFile(activity);
+
+                    // Anroot: Run the first-boot setup script
+                    runAnrootFirstBoot();
 
                     activity.runOnUiThread(whenDone);
 
@@ -241,6 +250,89 @@ final class TermuxInstaller {
                 }
             }
         }.start();
+    }
+
+    /**
+     * Set execute permissions on critical Anroot binaries and scripts.
+     * This is needed because some injected scripts may not have proper permissions
+     * from the zip extraction process.
+     */
+    private static void setAnrootPermissions(String stagingPrefixPath) {
+        try {
+            // Set execute on critical shell binaries
+            String[] criticalBinaries = {
+                "bin/login", "bin/sh", "bin/dash", "bin/bash", "bin/zsh",
+                "bin/dpkg", "bin/dpkg-wrap", "bin/dpkg.real", "bin/dpkg-deb",
+                "bin/apt", "bin/apt-get", "bin/pkg",
+                "bin/anroot-first-boot", "bin/anroot-pkg",
+                "bin/anroot-setup-storage", "bin/anroot-setup-package-manager",
+                "bin/anroot-change-repo", "bin/anroot-info", "bin/anroot-open",
+                "bin/anroot-open-url", "bin/anroot-reset", "bin/anroot-fix-shebang",
+                "bin/anroot-chroot", "bin/anroot-reload-settings"
+            };
+            for (String bin : criticalBinaries) {
+                File f = new File(stagingPrefixPath, bin);
+                if (f.exists()) {
+                    Os.chmod(f.getAbsolutePath(), 0700);
+                }
+            }
+
+            // Set execute on all profile.d scripts
+            File profileDir = new File(stagingPrefixPath, "etc/profile.d");
+            if (profileDir.isDirectory()) {
+                File[] scripts = profileDir.listFiles();
+                if (scripts != null) {
+                    for (File script : scripts) {
+                        if (script.isFile()) {
+                            Os.chmod(script.getAbsolutePath(), 0700);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Failed to set Anroot permissions: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Run the Anroot first-boot setup script.
+     * This sets up the dpkg wrapper, fixes dpkg database paths, creates command aliases, etc.
+     */
+    private static void runAnrootFirstBoot() {
+        try {
+            String firstBootScript = TERMUX_PREFIX_DIR_PATH + "/bin/anroot-first-boot";
+            File script = new File(firstBootScript);
+            if (!script.exists()) {
+                Logger.logInfo(LOG_TAG, "Anroot first-boot script not found, skipping");
+                return;
+            }
+
+            Logger.logInfo(LOG_TAG, "Running Anroot first-boot setup...");
+            ProcessBuilder pb = new ProcessBuilder(firstBootScript);
+            pb.environment().put("PATH", TERMUX_PREFIX_DIR_PATH + "/bin:/system/bin");
+            pb.environment().put("HOME", TermuxConstants.TERMUX_HOME_DIR_PATH);
+            pb.environment().put("PREFIX", TERMUX_PREFIX_DIR_PATH);
+            pb.environment().put("TMPDIR", TermuxConstants.TERMUX_TMP_PREFIX_DIR_PATH);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+
+            // Read output
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String line;
+            StringBuilder output = new StringBuilder();
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+
+            int exitCode = process.waitFor();
+            if (exitCode == 0) {
+                Logger.logInfo(LOG_TAG, "Anroot first-boot setup completed successfully");
+            } else {
+                Logger.logError(LOG_TAG, "Anroot first-boot setup failed with exit code " + exitCode + ": " + output);
+            }
+        } catch (Exception e) {
+            Logger.logError(LOG_TAG, "Failed to run Anroot first-boot: " + e.getMessage());
+        }
     }
 
     public static void showBootstrapErrorDialog(Activity activity, Runnable whenDone, String message) {
@@ -339,7 +431,7 @@ final class TermuxInstaller {
                     // https://cs.android.com/android/platform/superproject/+/android-12.0.0_r32:frameworks/base/services/core/java/com/android/server/StorageManagerService.java;l=3796
                     // https://cs.android.com/android/platform/superproject/+/android-7.0.0_r36:frameworks/base/services/core/java/com/android/server/MountService.java;l=3053
 
-                    // Create "Android/data/com.termux" symlinks
+                    // Create "Android/data/com.anroot" symlinks
                     File[] dirs = context.getExternalFilesDirs(null);
                     if (dirs != null && dirs.length > 0) {
                         for (int i = 0; i < dirs.length; i++) {
@@ -351,7 +443,7 @@ final class TermuxInstaller {
                         }
                     }
 
-                    // Create "Android/media/com.termux" symlinks
+                    // Create "Android/media/com.anroot" symlinks
                     dirs = context.getExternalMediaDirs();
                     if (dirs != null && dirs.length > 0) {
                         for (int i = 0; i < dirs.length; i++) {
